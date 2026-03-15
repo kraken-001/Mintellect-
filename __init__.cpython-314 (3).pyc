@@ -1,0 +1,272 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from datetime import datetime, time
+from typing import List
+from app import models, schemas
+from app.dependencies import get_current_user
+from app.database import get_db
+
+router = APIRouter(prefix="/schedule", tags=["schedule"])
+
+
+@router.put("/bulk", response_model=List[schemas.Schedule])
+async def add_schedule_bulk(
+        schedule_data: schemas.ScheduleListCreate,  # Принимаем список уроков
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Добавить расписание списком уроков.
+
+    Пример JSON тела запроса:
+    {
+      "lessons": [
+        {
+          "day_of_week": 0,
+          "subject": "Математика",
+          "start_time": "09:00:00",
+          "end_time": "10:30:00"
+        },
+        {
+          "day_of_week": 0,
+          "subject": "Физика",
+          "start_time": "10:45:00",
+          "end_time": "12:15:00"
+        }
+      ]
+    }
+    """
+
+    # Проверяем, что список не пустой
+    if not schedule_data.lessons:
+        raise HTTPException(400, "Список уроков не может быть пустым")
+
+    created_lessons = []
+
+    try:
+
+        # Проверяем новое расписание на адекватность
+        errors = []
+        lessons_by_day: dict[int, List[dict]] = {}
+
+        # Заполняем словарик с уроками и валидируем отдельно взятые уроки
+        for i, lesson_data in enumerate(schedule_data.lessons):
+            # Проверяем валидность дня недели
+            if lesson_data.day_of_week < 0 or lesson_data.day_of_week > 6:
+                raise HTTPException(400, f"День недели должен быть от 0 до 6. Ошибка в уроке: {lesson_data.subject}")
+
+            # Проверяем, что время окончания позже времени начала
+            if lesson_data.end_time <= lesson_data.start_time:
+                raise HTTPException(400,
+                                    f"Время окончания должно быть позже времени начала. Ошибка в уроке: {lesson_data.subject}")
+
+            # Проверяем, что уроки не пересекаются
+            day = lesson_data.day_of_week
+            if day not in lessons_by_day:
+                lessons_by_day[day] = []
+
+            lessons_by_day[day].append({
+                'index': i,
+                'start': lesson_data.start_time,
+                'end': lesson_data.end_time,
+                'subject': lesson_data.subject
+            })
+
+        # Валидируем расписание целиком на пересечения уроков
+        for day, lessons in lessons_by_day.items():
+            # Сортируем уроки по времени начала
+            sorted_lessons = sorted(lessons, key=lambda x: x['start'])
+
+            # Проверяем каждый урок с последующим
+            for j in range(len(sorted_lessons) - 1):
+                current_lesson = sorted_lessons[j]
+                next_lesson = sorted_lessons[j + 1]
+
+                # Если текущий урок заканчивается позже начала следующего - пересечение
+                if current_lesson['end'] > next_lesson['start']:
+                    errors.append(
+                        f"В день {day} урок '{current_lesson['subject']}' "
+                        f"(#{current_lesson['index'] + 1}: {current_lesson['start'].strftime('%H:%M')}-{current_lesson['end'].strftime('%H:%M')}) "
+                        f"пересекается с уроком '{next_lesson['subject']}' "
+                        f"(#{next_lesson['index'] + 1}: {next_lesson['start'].strftime('%H:%M')}-{next_lesson['end'].strftime('%H:%M')})"
+                    )
+
+        # Если были найдены ошибки - возвращаем ошибки
+        if errors:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Обнаружены ошибки в расписании",
+                    "errors": errors
+                }
+            )
+
+        # Если все путем удаляем всё существующее расписание пользователя
+        deleted_count = db.query(models.Schedule).filter(
+            models.Schedule.user_id == current_user.id
+        ).delete()
+
+        # Если все путем, вставляем все в БД
+        for lesson_data in schedule_data.lessons:
+            # Создаем запись
+            db_schedule = models.Schedule(
+                day_of_week=lesson_data.day_of_week,
+                subject=lesson_data.subject,
+                start_time=lesson_data.start_time,
+                end_time=lesson_data.end_time,
+                user_id=current_user.id
+            )
+            db.add(db_schedule)
+            created_lessons.append(db_schedule)
+
+
+        print(lessons_by_day)
+        # Фиксируем все изменения одной транзакцией
+        db.commit()
+
+        # Обновляем объекты чтобы получить их id
+        for lesson in created_lessons:
+            db.refresh(lesson)
+
+        return created_lessons
+
+    except Exception as e:
+        # Если ошибка - откатываем всю транзакцию
+        db.rollback()
+        raise HTTPException(500, f"Ошибка при добавлении расписания: {str(e)}")
+
+
+@router.post("/", response_model=schemas.Schedule)
+async def add_schedule_item(
+        schedule: schemas.ScheduleCreate,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Добавить один предмет в расписание.
+    """
+    # Проверяем валидность дня недели
+    if schedule.day_of_week < 0 or schedule.day_of_week > 6:
+        raise HTTPException(400, "День недели должен быть от 0 (понедельник) до 6 (воскресенье)")
+
+    # Проверяем, что время окончания позже времени начала
+    if schedule.end_time <= schedule.start_time:
+        raise HTTPException(400, "Время окончания должно быть позже времени начала")
+
+    db_schedule = models.Schedule(
+        day_of_week=schedule.day_of_week,
+        subject=schedule.subject,
+        start_time=schedule.start_time,
+        end_time=schedule.end_time,
+        user_id=current_user.id
+    )
+    db.add(db_schedule)
+    db.commit()
+    db.refresh(db_schedule)
+    return db_schedule
+
+
+@router.get("/my", response_model=List[schemas.Schedule])
+async def get_my_schedule(
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Получить всё расписание пользователя.
+    """
+    schedules = db.query(models.Schedule).filter(
+        models.Schedule.user_id == current_user.id
+    ).order_by(
+        models.Schedule.day_of_week,
+        models.Schedule.start_time
+    ).all()
+
+    return schedules
+
+
+@router.get("/today", response_model=List[schemas.TodayLesson])
+async def get_today_schedule(
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Получить расписание на сегодня с пометками:
+    - current: текущий урок
+    - next: следующий урок
+    - previous: предыдущий урок
+    - future: будущие уроки
+    """
+    today_weekday = datetime.now().weekday()  # 0-6
+    current_time = datetime.now().time()
+
+    # Получаем расписание на сегодня
+    today_schedule = db.query(models.Schedule).filter(
+        models.Schedule.user_id == current_user.id,
+        models.Schedule.day_of_week == today_weekday
+    ).order_by(models.Schedule.start_time).all()
+
+    if not today_schedule:
+        return []
+
+    result = []
+    has_current = False
+    has_next = False
+
+    for lesson in today_schedule:
+        status = "future"
+
+        if lesson.start_time <= current_time <= lesson.end_time:
+            status = "current"
+            has_current = True
+        elif current_time > lesson.end_time:
+            status = "previous"
+        elif current_time < lesson.start_time:
+            if not has_current and not has_next:
+                status = "next"
+                has_next = True
+            else:
+                status = "future"
+
+        result.append(schemas.TodayLesson(
+            subject=lesson.subject,
+            time=f"{lesson.start_time.strftime('%H:%M')}-{lesson.end_time.strftime('%H:%M')}",
+            status=status
+        ))
+
+    return result
+
+
+@router.delete("/{schedule_id}")
+async def delete_schedule_item(
+        schedule_id: int,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Удалить предмет из расписания по ID.
+    """
+    schedule = db.query(models.Schedule).filter(
+        models.Schedule.id == schedule_id,
+        models.Schedule.user_id == current_user.id
+    ).first()
+
+    if not schedule:
+        raise HTTPException(404, "Предмет не найден")
+
+    db.delete(schedule)
+    db.commit()
+    return {"message": "Предмет удален из расписания"}
+
+
+@router.delete("/", status_code=204)
+async def clear_my_schedule(
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Удалить ВСЁ расписание пользователя.
+    """
+    db.query(models.Schedule).filter(
+        models.Schedule.user_id == current_user.id
+    ).delete()
+    db.commit()

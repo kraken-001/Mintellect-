@@ -1,0 +1,71 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app import schemas, models, utils
+
+router = APIRouter()
+
+
+@router.post("/register", status_code=201)
+async def register(
+        user_data: schemas.UserRegister,
+        db: Session = Depends(get_db)
+):
+    # Проверка, что логин свободен
+    existing_user = db.query(models.User).filter(
+        models.User.login == user_data.login
+    ).first()
+
+    if existing_user:
+        print(existing_user)
+        raise HTTPException(400, "Логин уже занят")
+
+    # Создаем пользователя
+    hashed_password = utils.security.hash_password(user_data.password)
+
+    new_user = models.User(
+        nickname=user_data.nickname,
+        login=user_data.login,
+        hashed_password=hashed_password
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return {"message": "Пользователь создан", "user_id": new_user.id}
+
+
+@router.post("/login", response_model=schemas.TokenResponse)
+async def login(
+        user_data: schemas.UserLogin,
+        db: Session = Depends(get_db)
+):
+    # Ищем пользователя
+    user = db.query(models.User).filter(
+        models.User.login == user_data.login
+    ).first()
+
+    if not user or not utils.security.verify_password(
+            user_data.password, user.hashed_password
+    ):
+        raise HTTPException(401, "Неверный логин или пароль")
+
+    # Генерируем токен
+    token_data = utils.security.create_access_token(user.id)
+
+    # Сохраняем сессию
+    new_session = models.Session(
+        user_id=user.id,
+        access_token=token_data["access_token"],
+        expires_at=token_data["expires_at"]
+    )
+
+    db.add(new_session)
+    db.commit()
+
+    return {
+        "access_token": token_data["access_token"],
+        "user_id": user.id,
+        "nickname": user.nickname
+    }

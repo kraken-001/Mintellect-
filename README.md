@@ -1,1 +1,2 @@
-# Mintellect-
+streamlit>=1.28.0
+requests>=2.31.0

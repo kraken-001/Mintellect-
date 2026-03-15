@@ -1,0 +1,59 @@
+# app/database.py
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Путь к БД (кроссплатформенно)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "..", "school_notes.db")
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
+
+# Параметры для Windows
+connect_args = {}
+if os.name == 'nt':  # Windows
+    connect_args = {"check_same_thread": False}
+
+# Создаем движок
+try:
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        connect_args=connect_args,
+        echo=False  # Включи True для отладки SQL-запросов
+    )
+    logger.info(f"✅ Движок БД создан: {SQLALCHEMY_DATABASE_URL}")
+except Exception as e:
+    logger.error(f"❌ Ошибка создания движка БД: {e}")
+    raise
+
+# Создаем фабрику сессий
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+    expire_on_commit=False
+)
+
+Base = declarative_base()
+
+def get_db():
+    """
+    Зависимость для получения сессии БД.
+    Использование:
+        db: Session = Depends(get_db)
+    """
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()  # Коммитим если нет исключений
+    except SQLAlchemyError as e:
+        db.rollback()  # Откатываем при ошибке
+        logger.error(f"❌ Ошибка БД: {e}")
+        raise
+    finally:
+        db.close()

@@ -1,0 +1,60 @@
+# 🐺 Mintellect — Frontend (Streamlit)
+
+Фронтенд для школьного дневника Mintellect на базе Python + Streamlit.
+
+## Структура
+
+```
+mintellect/
+├── app.py                  # Точка входа
+├── api_client.py           # HTTP-клиент для бэкенда
+├── ui_helpers.py           # CSS, общие компоненты, auth guard
+├── requirements.txt
+├── .streamlit/
+│   └── config.toml         # Тема (тёмная, золотые акценты)
+└── pages/
+    ├── 1_Auth.py           # Авторизация / регистрация
+    ├── 2_Home.py           # Текущие уроки + заметки на сегодня
+    ├── 3_Schedule.py       # Недельный вид + добавление/удаление
+    ├── 4_Notes.py          # CRUD заметок + вложения + фильтры
+    ├── 5_Groups.py         # Управление группами + участники
+    └── 6_Settings.py       # Профиль + подключение к серверу
+```
+
+## Установка и запуск
+
+```bash
+# 1. Установить зависимости
+pip install -r requirements.txt
+
+# 2. Убедиться, что бэкенд запущен
+uvicorn app.main:app --reload  # в папке бэкенда
+
+# 3. Запустить фронтенд
+streamlit run app.py
+```
+
+Откроется браузер на http://localhost:8501
+
+## Настройка
+
+Если бэкенд запущен не на `localhost:8000`, измени URL в `api_client.py`:
+```python
+BASE_URL = "http://your-server:8000/api"
+```
+Или сделай это прямо в интерфейсе на странице ⚙️ Настройки.
+
+## CORS (обязательно для бэкенда)
+
+Добавь в `app/main.py` бэкенда:
+```python
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```

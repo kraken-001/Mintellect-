@@ -1,0 +1,302 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from datetime import date
+from app import models, schemas
+from app.dependencies import get_current_user
+from app.database import get_db
+
+router = APIRouter(prefix="/notes", tags=["notes"])
+
+
+@router.post("/", response_model=schemas.NoteWithAttachments)
+async def create_note(
+        note_data: schemas.NoteCreate,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Создать новую заметку.
+    visibility: "private" или "group". Если group, требуется group_id.
+    """
+    # Если групповая заметка, проверяем членство в группе
+    if note_data.visibility == "group":
+        if not note_data.group_id:
+            raise HTTPException(400, "Для групповой заметки нужно указать group_id")
+        membership = db.query(models.Membership).filter_by(
+            group_id=note_data.group_id,
+            user_id=current_user.id
+        ).first()
+        if not membership:
+            raise HTTPException(403, "Вы не состоите в этой группе")
+    else:
+        # Личная заметка: group_id должен быть None
+        note_data.group_id = None
+
+    # Проверка schedule_id (если указан)
+    if note_data.schedule_id:
+        schedule = db.query(models.Schedule).filter(
+            models.Schedule.id == note_data.schedule_id,
+            models.Schedule.user_id == current_user.id
+        ).first()
+        if not schedule:
+            raise HTTPException(404, "Урок не найден или не принадлежит вам")
+
+    # Проверка даты (не в будущем)
+    if note_data.date > date.today():
+        raise HTTPException(400, "Нельзя создавать заметки на будущие даты")
+
+    # Создаём заметку
+    new_note = models.Note(
+        title=note_data.title,
+        content=note_data.content,
+        date=note_data.date,
+        schedule_id=note_data.schedule_id,
+        user_id=current_user.id,
+        visibility=note_data.visibility,
+        group_id=note_data.group_id
+    )
+    db.add(new_note)
+    db.commit()
+    db.refresh(new_note)
+    return new_note
+
+
+@router.get("/", response_model=List[schemas.NoteWithAttachments])
+async def get_notes(
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+        start_date: Optional[date] = Query(None),
+        end_date: Optional[date] = Query(None),
+        schedule_id: Optional[int] = Query(None),
+        limit: int = Query(50, ge=1, le=100),
+        offset: int = Query(0, ge=0)
+):
+    """
+    Получить заметки пользователя (только личные, видимые ему).
+    Групповые заметки не возвращаются здесь — для них отдельный эндпоинт.
+    """
+    query = db.query(models.Note).filter(
+        models.Note.user_id == current_user.id,
+        models.Note.visibility == "private"  # только личные
+    )
+
+    if start_date:
+        query = query.filter(models.Note.date >= start_date)
+    if end_date:
+        query = query.filter(models.Note.date <= end_date)
+    if schedule_id:
+        schedule = db.query(models.Schedule).filter(
+            models.Schedule.id == schedule_id,
+            models.Schedule.user_id == current_user.id
+        ).first()
+        if not schedule:
+            raise HTTPException(404, "Урок не найден")
+        query = query.filter(models.Note.schedule_id == schedule_id)
+
+    notes = query.order_by(
+        models.Note.date.desc(),
+        models.Note.created_at.desc()
+    ).offset(offset).limit(limit).all()
+    return notes
+
+
+@router.get("/group/{group_id}", response_model=List[schemas.NoteWithAttachments])
+async def get_group_notes(
+        group_id: int,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """
+    Получить все заметки группы, в которой состоит пользователь.
+    """
+    # Проверяем членство
+    membership = db.query(models.Membership).filter_by(
+        group_id=group_id,
+        user_id=current_user.id
+    ).first()
+    if not membership:
+        raise HTTPException(403, "Вы не состоите в этой группе")
+
+    notes = db.query(models.Note).filter(
+        models.Note.group_id == group_id,
+        models.Note.visibility == "group"
+    ).order_by(models.Note.date.desc()).all()
+    return notes
+
+
+@router.get("/by-date/{note_date}", response_model=List[schemas.NoteWithAttachments])
+async def get_notes_by_date(
+        note_date: date,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    # Только личные заметки
+    notes = db.query(models.Note).filter(
+        models.Note.user_id == current_user.id,
+        models.Note.visibility == "private",
+        models.Note.date == note_date
+    ).order_by(models.Note.created_at.desc()).all()
+    return notes
+
+
+@router.get("/by-schedule/{schedule_id}", response_model=List[schemas.NoteWithAttachments])
+async def get_notes_by_schedule(
+        schedule_id: int,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    schedule = db.query(models.Schedule).filter(
+        models.Schedule.id == schedule_id,
+        models.Schedule.user_id == current_user.id
+    ).first()
+    if not schedule:
+        raise HTTPException(404, "Урок не найден")
+
+    notes = db.query(models.Note).filter(
+        models.Note.user_id == current_user.id,
+        models.Note.visibility == "private",
+        models.Note.schedule_id == schedule_id
+    ).order_by(models.Note.date.desc()).all()
+    return notes
+
+
+@router.get("/{note_id}", response_model=schemas.NoteWithAttachments)
+async def get_note(
+        note_id: int,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+    if not note:
+        raise HTTPException(404, "Заметка не найдена")
+
+    # Проверка доступа
+    if note.visibility == "private":
+        if note.user_id != current_user.id:
+            raise HTTPException(403, "Нет доступа к этой заметке")
+    else:  # group
+        if not note.group_id:
+            raise HTTPException(403, "Некорректная заметка")
+        membership = db.query(models.Membership).filter_by(
+            group_id=note.group_id,
+            user_id=current_user.id
+        ).first()
+        if not membership:
+            raise HTTPException(403, "Вы не состоите в группе этой заметки")
+
+    return note
+
+
+@router.put("/{note_id}", response_model=schemas.NoteWithAttachments)
+async def update_note(
+        note_id: int,
+        note_data: schemas.NoteUpdate,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+    if not note:
+        raise HTTPException(404, "Заметка не найдена")
+
+    # Только автор может редактировать (можно расширить для админов группы)
+    if note.user_id != current_user.id:
+        raise HTTPException(403, "Вы не автор этой заметки")
+
+    # Если меняется группа или видимость, проверяем
+    if note_data.visibility == "group":
+        if not note_data.group_id:
+            raise HTTPException(400, "Для групповой видимости нужен group_id")
+        membership = db.query(models.Membership).filter_by(
+            group_id=note_data.group_id,
+            user_id=current_user.id
+        ).first()
+        if not membership:
+            raise HTTPException(403, "Вы не состоите в этой группе")
+    elif note_data.visibility == "private":
+        note_data.group_id = None
+
+    # Обновляем поля
+    if note_data.title is not None:
+        note.title = note_data.title
+    if note_data.content is not None:
+        note.content = note_data.content
+    if note_data.date is not None:
+        note.date = note_data.date
+    if note_data.schedule_id is not None:
+        # Проверка schedule_id
+        if note_data.schedule_id:
+            schedule = db.query(models.Schedule).filter(
+                models.Schedule.id == note_data.schedule_id,
+                models.Schedule.user_id == current_user.id
+            ).first()
+            if not schedule:
+                raise HTTPException(404, "Урок не найден")
+        note.schedule_id = note_data.schedule_id
+    if note_data.visibility is not None:
+        note.visibility = note_data.visibility
+    if note_data.group_id is not None:
+        note.group_id = note_data.group_id
+
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+@router.delete("/{note_id}")
+async def delete_note(
+        note_id: int,
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    note = db.query(models.Note).filter(models.Note.id == note_id).first()
+    if not note:
+        raise HTTPException(404, "Заметка не найдена")
+
+    # Только автор (или админ группы — по желанию)
+    if note.user_id != current_user.id:
+        raise HTTPException(403, "Вы не автор этой заметки")
+
+    db.delete(note)
+    db.commit()
+    return {"message": "Заметка удалена"}
+
+
+@router.get("/today/with-lessons", response_model=List[dict])
+async def get_today_notes_with_lessons(
+        current_user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    today = date.today()
+
+    # Получаем заметки на сегодня (личные)
+    today_notes = db.query(models.Note).filter(
+        models.Note.user_id == current_user.id,
+        models.Note.visibility == "private",
+        models.Note.date == today
+    ).all()
+
+    result = []
+    for note in today_notes:
+        note_dict = {
+            "id": note.id,
+            "title": note.title,
+            "content": note.content,
+            "created_at": note.created_at,
+            "date": note.date,
+            "has_lesson": False,
+            "lesson_info": None
+        }
+        if note.schedule_id:
+            schedule = db.query(models.Schedule).filter(
+                models.Schedule.id == note.schedule_id
+            ).first()
+            if schedule:
+                note_dict["has_lesson"] = True
+                note_dict["lesson_info"] = {
+                    "subject": schedule.subject,
+                    "time": f"{schedule.start_time.strftime('%H:%M')}-{schedule.end_time.strftime('%H:%M')}",
+                    "day_of_week": schedule.day_of_week
+                }
+        result.append(note_dict)
+    return result

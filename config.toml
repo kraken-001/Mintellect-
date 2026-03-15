@@ -1,0 +1,128 @@
+"""
+Страница заметок.
+"""
+import streamlit as st
+from datetime import date
+from api_client import get_notes, create_note, update_note, delete_note, get_schedule
+from ui_helpers import inject_css, page_header, require_auth
+
+inject_css()
+token, user = require_auth()
+page_header("Заметки", "Создавай и управляй заметками")
+
+# Загрузка расписания для выбора
+try:
+    schedule = get_schedule(token)
+except:
+    schedule = []
+
+# Tabs: Список и Создание
+tab_list, tab_create = st.tabs(["Список", "Создать"])
+
+with tab_list:
+    # Фильтры
+    col1, col2 = st.columns(2)
+    with col1:
+        filter_date = st.date_input("Дата (от)", value=None)
+    with col2:
+        filter_date_end = st.date_input("Дата (до)", value=None)
+    
+    # Параметры
+    params = {}
+    if filter_date:
+        params["start_date"] = filter_date.isoformat()
+    if filter_date_end:
+        params["end_date"] = filter_date_end.isoformat()
+    
+    # Загрузка заметок
+    try:
+        notes = get_notes(token, **params) if params else get_notes(token)
+    except Exception as e:
+        st.error(f"Ошибка: {e}")
+        notes = []
+    
+    st.write(f"Найдено: {len(notes)} заметок")
+    
+    for note in notes:
+        with st.expander(f"📌 {note['title']} ({note['date']})"):
+            st.write(note["content"])
+            
+            # Кнопки действий
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Редактировать", key=f"edit_{note['id']}"):
+                    st.session_state.edit_note = note
+                    st.rerun()
+            with col2:
+                if st.button("Удалить", key=f"del_{note['id']}"):
+                    try:
+                        delete_note(token, note["id"])
+                        st.success("Удалено!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+
+with tab_create:
+    # Проверка редактирования
+    if "edit_note" in st.session_state:
+        note = st.session_state.edit_note
+        st.warning(f"Редактирование заметки #{note['id']}")
+        
+        with st.form("edit_note"):
+            title = st.text_input("Заголовок", value=note["title"])
+            content = st.text_area("Содержание", value=note["content"])
+            note_date = st.date_input("Дата", value=date.fromisoformat(note["date"]))
+            
+            schedule_options = ["Без урока"] + [s["subject"] for s in schedule]
+            current_subject = next((s["subject"] for s in schedule if s["id"] == note.get("schedule_id")), "Без урока")
+            current_idx = schedule_options.index(current_subject) if current_subject in schedule_options else 0
+            selected = st.selectbox("Связать с уроком", schedule_options, index=current_idx)
+            
+            schedule_id = None
+            if selected != "Без урока":
+                schedule_id = next(s["id"] for s in schedule if s["subject"] == selected)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                submit = st.form_submit_button("Сохранить", use_container_width=True)
+            with col2:
+                cancel = st.form_submit_button("Отмена", use_container_width=True)
+            
+            if submit:
+                try:
+                    update_note(token, note["id"], title, content, note_date.isoformat(), schedule_id)
+                    del st.session_state.edit_note
+                    st.success("Сохранено!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}")
+            
+            if cancel:
+                del st.session_state.edit_note
+                st.rerun()
+    else:
+        # Создание новой заметки
+        with st.form("create_note"):
+            title = st.text_input("Заголовок")
+            content = st.text_area("Содержание")
+            note_date = st.date_input("Дата", value=date.today())
+            
+            schedule_options = ["Без урока"] + [s["subject"] for s in schedule]
+            selected = st.selectbox("Связать с уроком", schedule_options)
+            
+            schedule_id = None
+            if selected != "Без урока":
+                schedule_id = next(s["id"] for s in schedule if s["subject"] == selected)
+            
+            submit = st.form_submit_button("Создать", use_container_width=True)
+            
+            if submit:
+                if not title or not content:
+                    st.error("Заполни заголовок и содержание")
+                else:
+                    try:
+                        create_note(token, title, content, note_date.isoformat(), schedule_id)
+                        st.success("Заметка создана!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")

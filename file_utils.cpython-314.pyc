@@ -1,0 +1,159 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List
+from app.dependencies import get_current_user
+from app.database import get_db
+from app import models, schemas
+
+router = APIRouter(prefix="/groups", tags=["Groups"])
+
+
+def get_group_and_check_member(group_id: int, user: models.User, db: Session, required_role: str = None):
+    group = db.query(models.Group).filter(models.Group.id == group_id).first()
+    if not group:
+        raise HTTPException(404, "Группа не найдена")
+
+    membership = db.query(models.Membership).filter_by(group_id=group_id, user_id=user.id).first()
+    if not membership:
+        raise HTTPException(403, "Вы не состоите в этой группе")
+
+    if required_role and membership.role != required_role:
+        raise HTTPException(403, f"Требуется роль {required_role}")
+
+    return group, membership
+
+
+@router.post("/", response_model=schemas.Group)
+async def create_group(
+    group_data: schemas.GroupCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group = models.Group(
+        name=group_data.name,
+        description=group_data.description,
+        created_by=current_user.id
+    )
+    db.add(group)
+    db.flush()
+
+    membership = models.Membership(
+        user_id=current_user.id,
+        group_id=group.id,
+        role="admin"
+    )
+    db.add(membership)
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.get("/", response_model=List[schemas.Group])
+async def get_my_groups(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    memberships = db.query(models.Membership).filter_by(user_id=current_user.id).all()
+    groups = [m.group for m in memberships]
+    for g in groups:
+        g.members_count = len(g.members)
+    return groups
+
+
+@router.get("/{group_id}", response_model=schemas.Group)
+async def get_group(
+    group_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group, _ = get_group_and_check_member(group_id, current_user, db)
+    group.members_count = len(group.members)
+    return group
+
+
+@router.put("/{group_id}", response_model=schemas.Group)
+async def update_group(
+    group_id: int,
+    group_data: schemas.GroupUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group, membership = get_group_and_check_member(group_id, current_user, db, required_role="admin")
+    group.name = group_data.name
+    group.description = group_data.description
+    db.commit()
+    db.refresh(group)
+    group.members_count = len(group.members)
+    return group
+
+
+@router.delete("/{group_id}", status_code=204)
+async def delete_group(
+    group_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group, membership = get_group_and_check_member(group_id, current_user, db, required_role="admin")
+    db.delete(group)
+    db.commit()
+    return None
+
+
+@router.post("/{group_id}/members")
+async def add_member(
+    group_id: int,
+    member_data: schemas.MembershipCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group, membership = get_group_and_check_member(group_id, current_user, db, required_role="admin")
+
+    user_to_add = db.query(models.User).filter(models.User.login == member_data.user_login).first()
+    if not user_to_add:
+        raise HTTPException(404, "Пользователь не найден")
+
+    existing = db.query(models.Membership).filter_by(group_id=group_id, user_id=user_to_add.id).first()
+    if existing:
+        raise HTTPException(400, "Пользователь уже состоит в группе")
+
+    new_member = models.Membership(
+        user_id=user_to_add.id,
+        group_id=group_id,
+        role="member"
+    )
+    db.add(new_member)
+    db.commit()
+    return {"message": "Участник добавлен"}
+
+
+@router.delete("/{group_id}/members/{user_id}")
+async def remove_member(
+    group_id: int,
+    user_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group, membership = get_group_and_check_member(group_id, current_user, db)
+
+    if current_user.id == user_id:
+        target_membership = membership
+    else:
+        if membership.role != "admin":
+            raise HTTPException(403, "Только админ может исключать других")
+        target_membership = db.query(models.Membership).filter_by(group_id=group_id, user_id=user_id).first()
+        if not target_membership:
+            raise HTTPException(404, "Участник не найден")
+
+    db.delete(target_membership)
+    db.commit()
+    return {"message": "Участник удалён"}
+
+
+@router.get("/{group_id}/members", response_model=List[schemas.Membership])
+async def list_members(
+    group_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    group, _ = get_group_and_check_member(group_id, current_user, db)
+    return group.members

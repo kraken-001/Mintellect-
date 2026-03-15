@@ -1,0 +1,51 @@
+import streamlit as st
+from datetime import date
+
+st.title("🏠 Главная")
+
+# Получение расписания на сегодня
+response = api_request("GET", "/schedule/today")
+if response and response.status_code == 200:
+    lessons_today = response.json()
+    
+    st.subheader("📅 Расписание на сегодня")
+    
+    if lessons_today:
+        for lesson in lessons_today:
+            status_emoji = {
+                "current": "🔴",
+                "next": "🟡", 
+                "previous": "⚪",
+                "future": "⚪"
+            }.get(lesson["status"], "")
+            
+            status_text = {
+                "current": "Сейчас",
+                "next": "Следующий",
+                "previous": "Прошедший",
+                "future": "Будущий"
+            }.get(lesson["status"], "")
+            
+            st.write(f"{status_emoji} **{lesson['subject']}** — {lesson['time']} ({status_text})")
+    else:
+        st.info("На сегодня нет уроков")
+
+# Получение заметок на сегодня
+today_str = date.today().isoformat()
+response = api_request("GET", f"/notes/by-date/{today_str}")
+if response and response.status_code == 200:
+    notes_today = response.json()
+    
+    st.subheader("📝 Заметки на сегодня")
+    
+    if notes_today:
+        for note in notes_today:
+            with st.expander(f"{note['title']}"):
+                st.write(note["content"])
+                if note.get("has_lesson") and note.get("lesson_info"):
+                    st.caption(f"📚 {note['lesson_info']['subject']} — {note['lesson_info']['time']}")
+    else:
+        st.info("На сегодня заметок нет")
+
+st.divider()
+st.caption("Mintellect — твой помощник в учёбе 🐺")
